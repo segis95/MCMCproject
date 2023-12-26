@@ -1,0 +1,169 @@
+import tensorflow as tf
+import numpy as np
+import scipy
+import tensorflow_probability as tfp
+
+
+tfd = tfp.distributions
+dist = tfd.Normal(loc=0., scale=1.) # gaussian variables generator
+
+# returns value and confidence interval width for p_0 classical method
+def classical_I(N):
+    N_sim = int(N)
+    t = tf.cast((dist.sample([N_sim]) > 3.0), tf.float32)
+    t = tf.nn.moments(t, axes = [-1])
+    
+    with tf.Session() as sess:
+        a, b = sess.run([t[0], t[1]])
+        b = 1.96 * np.sqrt(b) / np.sqrt(N_sim)
+    return a, b
+	
+	
+	
+# returns value and confidence interval width for p_1 classical method	
+def classical_II(N):
+    
+    N_sim = int(N)
+
+    t1 = dist.sample([N_sim])
+    t2 = dist.sample([N_sim])
+    
+    t = tf.cast((t1 > 3.0) , tf.float32)
+    t = t * tf.cast((t1 + t2) < -1.0,  tf.float32)
+    
+    t = tf.nn.moments(t, axes = [-1])
+    with tf.Session() as sess:
+        a, b = sess.run([t[0], t[1]])
+        b = 1.96 * np.sqrt(b) / np.sqrt(N_sim)
+    return a, b
+	
+
+
+# returns value and confidence interval width for p_0 importance sampling method	
+def preferential_I(N):
+    N_sim = int(N)
+    t = dist.sample([N_sim])
+    t = tf.exp(-4.5 - 3*t) * tf.cast(t > 0.0 ,tf.float32)
+    
+    t = tf.nn.moments(t, axes = [-1])
+    with tf.Session() as sess:
+        a, b = sess.run([t[0], t[1]])
+        b = 1.96 * np.sqrt(b) / np.sqrt(N_sim)
+    return a, b
+	
+# returns value and confidence interval width for p_1 importance sampling method		
+def preferential_II(N):
+    N_sim = int(N)
+    
+    t1 = dist.sample([N_sim])
+    t2 = dist.sample([N_sim])
+    
+    t = tf.exp(-4.5 - 3.0 * t1) * tf.cast(t1 > 0.0 ,tf.float32)
+    t = t * tf.exp(-8.0 + 4.0*t2) * tf.cast(t1 + t2 < 0.0 ,tf.float32)
+    
+    t = tf.nn.moments(t, axes = [-1])
+    a, b = 0, 0
+    with tf.Session() as sess:
+        a, b = sess.run([t[0], t[1]])
+        b = 1.96 * np.sqrt(b) / np.sqrt(N_sim)
+    return a, b
+	
+#  returns value and confidence interval width for p_1 particle filtration method
+#  please choose INSIDE FUNCTION the g_0 function
+
+def particular_II(N, a = 1.0):
+    N_sim = int(N)
+    
+    t1 = dist.sample([N_sim])
+    
+    #polynomial phi:
+    #lambd = lambda x: tf.clip_by_value(x, 1e-15, 1e10)
+    #lambd = lambda x: tf.clip_by_value(x * x, 1e-15, 1e10)
+    #lambd = lambda x: tf.clip_by_value(x * x * x, 1e-15, 1e10)
+    #lambd = lambda x: tf.clip_by_value(x * x * x * x, 1e-15, 1e10)
+    #lambd = lambda x: tf.clip_by_value(x * x * x * x * x, 1e-15, 1e10)
+    #lambd = lambda x: tf.clip_by_value(x * x * x * x * x * x * x, 1e-15, 1e10)
+    #lambd = lambda x: tf.clip_by_value(x * x * x * x * x * x * x * x * x, 1e-15, 1e10)
+    
+    #exponential phi:
+    lambd = lambda x: tf.clip_by_value(tf.exp(a * x), 1e-15, 1e10)
+    
+    p = tf.clip_by_value(lambd(t1), 1e-15, 1e10)
+    
+    with tf.device('/cpu:0'):
+        samples = tf.random.categorical([tf.log(p)], N_sim)
+   
+
+    with tf.device('/gpu:0'):
+    
+        samples = tf.gather_nd(t1, tf.expand_dims(samples, -1))
+    
+        t2 = samples + dist.sample([N_sim])
+    
+        t = tf.cast((samples > 3.0) , tf.float32)
+        t = t * tf.cast( t2 < - 1.0,  tf.float32)
+    
+    v = 0.0
+    
+    with tf.Session() as sess:
+        m1, v1 = tf.nn.moments(p, axes = [-1])
+        vec2 = t / lambd(samples)
+        
+        m2, v2 = tf.nn.moments(vec2, axes = [-1])
+        
+        cov = tf.reduce_mean((vec2 - m2) *(p - m1))
+        
+        m1, v1, m2, v2, cov = sess.run([m1, v1, m2, v2, cov])
+            
+    var_estimator = m1**2 * v2 / N_sim + m2**2 * v1 / N_sim + 2 * m1 * m2 * cov / N_sim
+
+    return m1 * m2, np.sqrt(var_estimator) * 1.96#, v1, m2[0], v2[0], cov
+    
+
+
+#******************************************************************************
+#*************************************binary_search****************************
+#Implemented but not used finally
+
+#returns the index of segment of arr = np.cumsum(probas) to which x belongs
+def binary_search(x, arr):
+    lgt = len(arr)
+    if len(arr) == 1:
+        return 0
+    if arr[-1] <= x:
+        return lgt - 1
+    else:
+        if len(arr) % 2 == 1:
+            if arr[(lgt - 1) // 2] > x:
+                return binary_search(x, arr[:(lgt - 1) // 2])
+            else:
+                return binary_search(x, arr[(lgt - 1) // 2:]) + (lgt - 1) // 2
+        else:
+            if arr[lgt // 2] > x:
+                return binary_search(x, arr[: lgt // 2])
+            else:
+                return binary_search(x, arr[lgt // 2:]) + lgt // 2
+#******************************************************************************
+#******************************************************************************
+	
+	
+	
+	
+	
+	
+# *********************************************************************	
+#PLEASE CHOOSE A SIMULATION TO LAUNCH HERE BELOW AND UNCOMMENT IT !!!
+
+	
+#classical_I(1e8)
+#classical_II(1e8)
+#preferential_I(1e8)
+#preferential_II(1e8)
+
+# for exponential function g_0(please choose it inside the function!!!!)
+#particular_II(N_sim, a = alpha)
+
+# for polynomial function g_0(please choose it inside the function!!!!)
+# #particular_II(N_sim, a = alpha)
+
+
